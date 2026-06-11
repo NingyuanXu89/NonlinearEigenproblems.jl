@@ -46,3 +46,29 @@ using LinearAlgebra
     end
 
 end
+
+@testset "Beyn contour diagnostics" begin
+    nep = nep_gallery("dep0")
+
+    info = contour_beyn_info(nep, logger=displaylevel, radius=1.0,
+                             neigs=1, k=2, N=100, sanity_check=false)
+    λ, V = contour_beyn(nep, logger=displaylevel, radius=1.0,
+                        neigs=1, k=2, N=100, sanity_check=false)
+
+    @test info.lambda == λ
+    @test info.V == V
+    @test length(info.singular_values) == info.capacity
+    @test info.estimated_rank <= info.capacity
+    @test info.number_returned == length(info.lambda)
+    @test length(info.residuals) == info.number_returned
+    @test length(info.inside_contour) == info.number_returned
+    @test info.estimated_rank ==
+        count(info.singular_values / info.singular_values[1] .> info.rank_drop_tol)
+
+    info_checked = contour_beyn_info(nep, logger=displaylevel, σ=0.2,
+                                     radius=1.0, neigs=3, sanity_check=true)
+    @test info_checked.number_returned == length(info_checked.lambda)
+    @test length(info_checked.residuals) == info_checked.number_returned
+    @test length(info_checked.inside_contour) == info_checked.number_returned
+    @test all(info_checked.residuals .< sqrt(eps(Float64)))
+end

@@ -83,6 +83,54 @@ The value `k=10` specifies how many columns the rectangular
 probe matrix has.
 In general, we do not obtain more `k` eigenvalues.
 
+## SIM screening workflow
+
+When the search region is larger than a single contour solve should cover,
+the spectral indicator method (SIM) can be used as a lightweight screening
+step. SIM only gives an active/inactive indicator for a region. It is not an
+eigenvalue count, and it does not return final eigenpairs.
+
+Start by defining a square or rectangular search region and subdividing it:
+
+```julia-repl
+julia> region = SquareRegion(0.0 + 0.0im, 0.5);
+julia> regions = subdivide(region);
+```
+
+The subregions can then be screened independently:
+
+```julia-repl
+julia> screened = sim_screen_regions(nep, regions);
+julia> active_regions = [r.region for r in screened if r.active];
+```
+
+Each active region can be converted to an enclosing contour for the contour
+solvers. The default enclosing contour is the circumscribed circle.
+
+```julia-repl
+julia> params = contour_parameters(enclosing_contour(active_regions[1]));
+julia> info = contour_beyn_info(nep; params..., k=10);
+```
+
+The info helper returns the eigenpairs together with diagnostics such as
+singular values, estimated rank, residuals, and inside-contour flags. The
+original [`contour_beyn`](@ref) and [`contour_block_SS`](@ref) functions still
+return only `(λ, V)`.
+
+The circumscribed contour can include points outside the square or rectangle,
+so filter returned eigenvalues back to the original region:
+
+```julia-repl
+julia> inside = filter(i -> inside_region(active_regions[1], info.lambda[i]), eachindex(info.lambda));
+```
+
+The SIM result and optional contour diagnostics can also be passed to a policy
+helper to decide the next step:
+
+```julia-repl
+julia> decision = sim_contour_decision(screened[1], info);
+```
+
 It seems that in this case `contour_block_SS` is better
 since it finds eigenvalues  which
 `contour_beyn` misses. However, a closer look reveals
