@@ -26,6 +26,7 @@ module NEPSolver
     include("method_rfi.jl")
     include("method_jd.jl")
     include("method_contour_common.jl")
+    include("method_sim.jl")
     include("method_beyncontour.jl")
     include("method_block_SS.jl")
     include("method_blocknewton.jl")

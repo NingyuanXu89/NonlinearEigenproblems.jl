@@ -86,7 +86,20 @@ projection methods:
 
 ```@docs
 contour_beyn
+contour_beyn_info
 contour_block_SS
+contour_block_SS_info
+SquareRegion
+RectangularRegion
+EllipseContour
+enclosing_contour
+contour_parameters
+inside_region
+subdivide
+sim_indicator
+sim_screen
+sim_screen_regions
+sim_contour_decision
 ```
 
 ## Arnoldi and Krylov based methods

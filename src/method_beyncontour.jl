@@ -5,7 +5,26 @@ using Distributed
 using LinearAlgebra
 using Random
 
-export contour_beyn
+export contour_beyn, contour_beyn_info, ContourBeynInfo
+
+"""
+    ContourBeynInfo
+
+Diagnostics returned by `contour_beyn_info`. `singular_values` are those of
+Beyn's `A0` moment matrix, and `estimated_rank` is the corresponding rank
+estimate using `rank_drop_tol`.
+"""
+struct ContourBeynInfo
+    lambda
+    V
+    singular_values
+    estimated_rank::Int
+    rank_drop_tol
+    capacity::Int
+    number_returned::Int
+    residuals
+    inside_contour
+end
 
 """
     λv,V=contour_beyn([eltype,] nep [,mintegrator];[tol,][logger,][σ,][radius,][linsolvercreator,][N,][neigs,][k])
@@ -61,6 +80,67 @@ function contour_beyn(::Type{T},
                       sanity_check=true,
                       rank_drop_tol=tol # Used in sanity checking
                       )where{T<:Number, MIntegrator<:MatrixIntegrator}
+    info = _contour_beyn_info_impl(T, nep, MIntegrator, false;
+                                   tol=tol, σ=σ, logger=logger,
+                                   linsolvercreator=linsolvercreator,
+                                   neigs=neigs, k=k, radius=radius, N=N,
+                                   errmeasure=errmeasure,
+                                   sanity_check=sanity_check,
+                                   rank_drop_tol=rank_drop_tol)
+    return (info.lambda, info.V)
+end
+
+"""
+    contour_beyn_info([eltype,] nep [,mintegrator]; kwargs...)
+
+Run Beyn's contour method and return a `ContourBeynInfo` object containing the
+same eigenpairs as `contour_beyn` plus diagnostics: singular values of `A0`,
+estimated rank, rank tolerance, capacity, returned count, residuals, and
+inside-contour flags. The existing `contour_beyn` API and return value are
+unchanged.
+"""
+contour_beyn_info(nep::NEP;params...)=contour_beyn_info(ComplexF64,nep;params...)
+contour_beyn_info(nep::NEP,MIntegrator;params...)=contour_beyn_info(ComplexF64,nep,MIntegrator;params...)
+function contour_beyn_info(::Type{T},
+                           nep::NEP,
+                           ::Type{MIntegrator}=MatrixTrapezoidal;
+                           tol::Real=sqrt(eps(real(T))), # Note tol is quite high for this method
+                           σ::Number=zero(complex(T)),
+                           logger=0,
+                           linsolvercreator=BackslashLinSolverCreator(),
+                           neigs::Integer=2, # Number of wanted eigvals
+                           k::Integer=neigs+1, # Columns in matrix to integrate
+                           radius::Union{Real,Tuple,Array}=1, # integration radius
+                           N::Integer=1000,  # Nof quadrature nodes
+                           errmeasure::ErrmeasureType = DefaultErrmeasure(nep),
+                           sanity_check=true,
+                           rank_drop_tol=tol # Used in sanity checking
+                           )where{T<:Number, MIntegrator<:MatrixIntegrator}
+    return _contour_beyn_info_impl(T, nep, MIntegrator, true;
+                                   tol=tol, σ=σ, logger=logger,
+                                   linsolvercreator=linsolvercreator,
+                                   neigs=neigs, k=k, radius=radius, N=N,
+                                   errmeasure=errmeasure,
+                                   sanity_check=sanity_check,
+                                   rank_drop_tol=rank_drop_tol)
+end
+
+function _contour_beyn_info_impl(::Type{T},
+                                 nep::NEP,
+                                 ::Type{MIntegrator},
+                                 compute_residuals::Bool;
+                                 tol::Real=sqrt(eps(real(T))),
+                                 σ::Number=zero(complex(T)),
+                                 logger=0,
+                                 linsolvercreator=BackslashLinSolverCreator(),
+                                 neigs::Integer=2,
+                                 k::Integer=neigs+1,
+                                 radius::Union{Real,Tuple,Array}=1,
+                                 N::Integer=1000,
+                                 errmeasure::ErrmeasureType = DefaultErrmeasure(nep),
+                                 sanity_check=true,
+                                 rank_drop_tol=tol
+                                 )where{T<:Number, MIntegrator<:MatrixIntegrator}
 
     @parse_logger_param!(logger)
 
@@ -134,7 +214,19 @@ function contour_beyn(::Type{T},
         sorted_index = sortperm(map(x->abs(σ-x), λ));
         inside_bool = (real(λ[sorted_index].-σ)/radius[1]).^2 + (imag(λ[sorted_index].-σ)/radius[2]).^2 .≤ 1
         inside_perm = sortperm(.!inside_bool)
-        return (λ[sorted_index[inside_perm]],V[:,sorted_index[inside_perm]])
+        returned_index = sorted_index[inside_perm]
+        λret = λ[returned_index]
+        Vret = V[:,returned_index]
+        inside_ret = (real(λret.-σ)/radius[1]).^2 + (imag(λret.-σ)/radius[2]).^2 .≤ 1
+        residuals_ret = Vector{real(T)}()
+        if compute_residuals
+            residuals_ret = zeros(real(T), length(λret))
+            for i = 1:length(λret)
+                residuals_ret[i] = estimate_error(errmeasure, λret[i], Vret[:,i])
+            end
+        end
+        return ContourBeynInfo(λret, Vret, S, p, rank_drop_tol, k,
+                               length(λret), residuals_ret, inside_ret)
     end
 
     # Compute all the errors
@@ -163,14 +255,17 @@ function contour_beyn(::Type{T},
     # Remove all eigpairs not sufficiently accurate
     # and potentially remove eigenvalues if more than neigs.
     local Vgood,λgood
+    local returned_index
     if( size(sorted_good_index,1) > neigs)
         found_evals=size(sorted_good_index,1);
         push_info!(logger,"Removing unwanted eigvals: neigs=$neigs<$found_evals=found_eigvals")
-        Vgood=V[:,sorted_good_index[sorted_good_inside_perm][1:neigs]];
-        λgood=λ[sorted_good_index[sorted_good_inside_perm][1:neigs]];
+        returned_index=sorted_good_index[sorted_good_inside_perm][1:neigs];
+        Vgood=V[:,returned_index];
+        λgood=λ[returned_index];
     else
-        Vgood=V[:,sorted_good_index[sorted_good_inside_perm]];
-        λgood=λ[sorted_good_index[sorted_good_inside_perm]];
+        returned_index=sorted_good_index[sorted_good_inside_perm];
+        Vgood=V[:,returned_index];
+        λgood=λ[returned_index];
     end
 
     if (p==k)
@@ -181,5 +276,7 @@ function contour_beyn(::Type{T},
        @warn "We found fewer eigvals than requested. Try increasing domain, or decreasing `tol`. This warning can be disabled with `sanity_check=false`." S
     end
 
-    return (λgood,Vgood)
+    inside_good = (real(λgood.-σ)/radius[1]).^2 + (imag(λgood.-σ)/radius[2]).^2 .≤ 1
+    return ContourBeynInfo(λgood, Vgood, S, p, rank_drop_tol, k,
+                           length(λgood), errmeasures[returned_index], inside_good)
 end

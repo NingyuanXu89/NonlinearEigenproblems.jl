@@ -1,7 +1,26 @@
 using Random;
 
 
-export contour_block_SS
+export contour_block_SS, contour_block_SS_info, ContourBlockSSInfo
+
+"""
+    ContourBlockSSInfo
+
+Diagnostics returned by `contour_block_SS_info`. `singular_values` are those of
+the block Hankel moment matrix, and `estimated_rank` is the corresponding rank
+estimate using `rank_drop_tol`.
+"""
+struct ContourBlockSSInfo
+    lambda
+    V
+    singular_values
+    estimated_rank::Int
+    rank_drop_tol
+    capacity::Int
+    number_returned::Int
+    residuals
+    inside_contour
+end
 
 """
     contour_block_SS([eltype,] nep [,mintegrator];[tol,][logger,][σ,][radius,][linsolvercreator,][N,][neigs,][k,][L])
@@ -61,6 +80,75 @@ function contour_block_SS(
     sanity_check=true,
     Shat_mode=:native, # native or JSIAM-mode
     rank_drop_tol=tol # Used in sanity checking
+)where{T<:Number, MIntegrator<:MatrixIntegrator}
+    info = _contour_block_SS_info_impl(T, nep, MIntegrator, false;
+                                       tol=tol, σ=σ, logger=logger,
+                                       linsolvercreator=linsolvercreator,
+                                       neigs=neigs, k=k, radius=radius, N=N,
+                                       K=K, errmeasure=errmeasure,
+                                       sanity_check=sanity_check,
+                                       Shat_mode=Shat_mode,
+                                       rank_drop_tol=rank_drop_tol)
+    return info.lambda, info.V
+end
+
+"""
+    contour_block_SS_info([eltype,] nep [,mintegrator]; kwargs...)
+
+Run the block SS contour method and return a `ContourBlockSSInfo` object
+containing the same eigenpairs as `contour_block_SS` plus diagnostics:
+singular values of the block Hankel moment matrix, estimated rank, rank
+tolerance, capacity, returned count, residuals, and inside-contour flags. The
+existing `contour_block_SS` API and return value are unchanged.
+"""
+contour_block_SS_info(nep::NEP;params...)=contour_block_SS_info(ComplexF64,nep;params...);
+contour_block_SS_info(nep::NEP,MIntegrator;params...)=contour_block_SS_info(ComplexF64,nep,MIntegrator;params...);
+function contour_block_SS_info(
+    ::Type{T},
+    nep::NEP,
+    ::Type{MIntegrator}=MatrixTrapezoidal;
+    tol::Real=sqrt(eps(real(T))), # Note tol is quite high for this method
+    σ::Number=zero(complex(T)),
+    logger=0,
+    linsolvercreator=BackslashLinSolverCreator(),
+    neigs=Inf, # Number of wanted eigvals (currently unused)
+    k::Integer=3, # Columns in matrix to integrate
+    radius::Union{Real,Tuple,Array}=1, # integration radius
+    N::Integer=1000,  # Nof quadrature nodes
+    K::Integer=3, # Nof moments
+    errmeasure::ErrmeasureType = DefaultErrmeasure(nep),
+    sanity_check=true,
+    Shat_mode=:native, # native or JSIAM-mode
+    rank_drop_tol=tol # Used in sanity checking
+)where{T<:Number, MIntegrator<:MatrixIntegrator}
+    return _contour_block_SS_info_impl(T, nep, MIntegrator, true;
+                                       tol=tol, σ=σ, logger=logger,
+                                       linsolvercreator=linsolvercreator,
+                                       neigs=neigs, k=k, radius=radius, N=N,
+                                       K=K, errmeasure=errmeasure,
+                                       sanity_check=sanity_check,
+                                       Shat_mode=Shat_mode,
+                                       rank_drop_tol=rank_drop_tol)
+end
+
+function _contour_block_SS_info_impl(
+    ::Type{T},
+    nep::NEP,
+    ::Type{MIntegrator},
+    compute_residuals::Bool;
+    tol::Real=sqrt(eps(real(T))),
+    σ::Number=zero(complex(T)),
+    logger=0,
+    linsolvercreator=BackslashLinSolverCreator(),
+    neigs=Inf,
+    k::Integer=3,
+    radius::Union{Real,Tuple,Array}=1,
+    N::Integer=1000,
+    K::Integer=3,
+    errmeasure::ErrmeasureType = DefaultErrmeasure(nep),
+    sanity_check=true,
+    Shat_mode=:native,
+    rank_drop_tol=tol
 )where{T<:Number, MIntegrator<:MatrixIntegrator}
 
     @parse_logger_param!(logger)
@@ -211,5 +299,15 @@ function contour_block_SS(
     Shat_mode == :JSIAM  ? factor=radius : factor=1
     λ=σ .+ factor*xi
 
-    return λ,V
+    residuals = Vector{real(T)}()
+    if compute_residuals
+        residuals = zeros(real(T), length(λ))
+        for i = 1:length(λ)
+            residuals[i] = estimate_error(errmeasure, λ[i], V[:,i])
+        end
+    end
+    inside_contour = (real(λ.-σ)/radius1[1]).^2 + (imag(λ.-σ)/radius1[2]).^2 .≤ 1
+
+    return ContourBlockSSInfo(λ, V, SS, mprime, rank_drop_tol, m,
+                              length(λ), residuals, inside_contour)
 end
