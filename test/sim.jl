@@ -10,6 +10,19 @@ function diagonal_linear_pep(λv)
     return PEP([A0, A1])
 end
 
+function region_corners(region)
+    half_width = isa(region, SquareRegion) ? region.half_side : region.half_width
+    half_height = isa(region, SquareRegion) ? region.half_side : region.half_height
+    return [region.center + sx*half_width + im*sy*half_height
+            for sx in (-1, 1), sy in (-1, 1)]
+end
+
+function inside_contour(contour, z)
+    dz = z - contour.center
+    return (real(dz) / contour.radius[1])^2 + (imag(dz) / contour.radius[2])^2 <=
+        1 + 10eps()
+end
+
 @testset "SIM region helpers" begin
     @test_throws ErrorException SquareRegion(0, 0)
     @test_throws ErrorException RectangularRegion(0, 1, 0)
@@ -29,7 +42,11 @@ end
     @test circle.radius[1] == circle.radius[2]
 
     ellipse = enclosing_contour(rect; shape=:ellipse)
-    @test ellipse.radius == (rect.half_width, rect.half_height)
+    @test ellipse.radius == (sqrt(2) * rect.half_width, sqrt(2) * rect.half_height)
+    @test all(corner -> inside_contour(ellipse, corner), region_corners(rect))
+    square_ellipse = enclosing_contour(square; shape=:ellipse)
+    @test square_ellipse.radius == circle.radius
+    @test all(corner -> inside_contour(square_ellipse, corner), region_corners(square))
     params = contour_parameters(ellipse)
     @test params.σ == rect.center
     @test params.radius == ellipse.radius
@@ -98,7 +115,10 @@ end
     @test length(default_contours[1].z) == 5
 
     ellipse_contours = collect_contour_boundaries(rect; n=4, shape=:ellipse)
-    @test ellipse_contours[1].contour.radius == (rect.half_width, rect.half_height)
+    @test ellipse_contours[1].contour.radius ==
+        (sqrt(2) * rect.half_width, sqrt(2) * rect.half_height)
+    @test all(corner -> inside_contour(ellipse_contours[1].contour, corner),
+              region_corners(rect))
 end
 
 @testset "SIM indicator and screening" begin
