@@ -111,10 +111,9 @@ _region_half_height(region::RectangularRegion) = region.half_height
 
 Convert a square or rectangular region to an enclosing `EllipseContour`.
 The default `:circle` is the circumscribed circle. `shape=:ellipse` returns an
-axis-aligned ellipse with semi-axes equal to the region half-width and
-half-height. SIM screening uses the circumscribed circle, so rectangular
-screening can produce false positives that should later be filtered with
-`inside_region`.
+circumscribed axis-aligned ellipse with the region corners on the boundary.
+SIM screening uses the circumscribed circle, so rectangular screening can
+produce false positives that should later be filtered with `inside_region`.
 """
 function enclosing_contour(region::Union{SquareRegion,RectangularRegion}; shape=:circle)
     half_width = _region_half_width(region)
@@ -122,7 +121,7 @@ function enclosing_contour(region::Union{SquareRegion,RectangularRegion}; shape=
     if shape == :circle
         return EllipseContour(region.center, sqrt(half_width^2 + half_height^2))
     elseif shape == :ellipse
-        return EllipseContour(region.center, (half_width, half_height))
+        return EllipseContour(region.center, (sqrt(2) * half_width, sqrt(2) * half_height))
     else
         error("unknown enclosing contour shape: $shape")
     end
