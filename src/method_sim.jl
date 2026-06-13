@@ -4,6 +4,7 @@ using Random
 export SquareRegion, RectangularRegion, EllipseContour
 export SIMResult, SIMContourDecision
 export enclosing_contour, contour_parameters, inside_region, subdivide
+export region_boundary, contour_boundary, collect_region_boundaries, collect_contour_boundaries
 export sim_indicator, sim_screen, sim_screen_regions, sim_contour_decision
 
 """
@@ -110,10 +111,9 @@ _region_half_height(region::RectangularRegion) = region.half_height
 
 Convert a square or rectangular region to an enclosing `EllipseContour`.
 The default `:circle` is the circumscribed circle. `shape=:ellipse` returns an
-axis-aligned ellipse with semi-axes equal to the region half-width and
-half-height. SIM screening uses the circumscribed circle, so rectangular
-screening can produce false positives that should later be filtered with
-`inside_region`.
+circumscribed axis-aligned ellipse with the region corners on the boundary.
+SIM screening uses the circumscribed circle, so rectangular screening can
+produce false positives that should later be filtered with `inside_region`.
 """
 function enclosing_contour(region::Union{SquareRegion,RectangularRegion}; shape=:circle)
     half_width = _region_half_width(region)
@@ -121,7 +121,7 @@ function enclosing_contour(region::Union{SquareRegion,RectangularRegion}; shape=
     if shape == :circle
         return EllipseContour(region.center, sqrt(half_width^2 + half_height^2))
     elseif shape == :ellipse
-        return EllipseContour(region.center, (half_width, half_height))
+        return EllipseContour(region.center, (sqrt(2) * half_width, sqrt(2) * half_height))
     else
         error("unknown enclosing contour shape: $shape")
     end
@@ -172,6 +172,174 @@ function subdivide(region::RectangularRegion)
                -child_half_width - im*child_half_height)
     return [RectangularRegion(region.center + offset, child_half_width, child_half_height)
             for offset in offsets]
+end
+
+_boundary_tuple(z) = (x=real.(z), y=imag.(z), z=z)
+
+"""
+    region_boundary(region; n=2)
+
+Return named coordinate vectors `(x=..., y=..., z=...)` for the closed
+boundary of a square or rectangular region. `n` is the number of samples per
+edge and must be at least 2.
+"""
+function region_boundary(region::Union{SquareRegion,RectangularRegion}; n::Integer=2)
+    n >= 2 || error("n must be at least 2")
+    half_width = _region_half_width(region)
+    half_height = _region_half_height(region)
+    x = collect(range(real(region.center) - half_width,
+                      stop=real(region.center) + half_width,
+                      length=n))
+    y = collect(range(imag(region.center) - half_height,
+                      stop=imag(region.center) + half_height,
+                      length=n))
+    z = [complex(xi, y[1]) for xi in x]
+    append!(z, (complex(x[end], yi) for yi in y[2:end]))
+    append!(z, (complex(xi, y[end]) for xi in reverse(x[1:end-1])))
+    append!(z, (complex(x[1], yi) for yi in reverse(y[1:end-1])))
+    return _boundary_tuple(z)
+end
+
+"""
+    contour_boundary(contour; n=100, closed=true)
+    contour_boundary(center, radius; n=100, closed=true)
+    contour_boundary(; σ, radius, n=100, closed=true)
+
+Return named coordinate vectors `(x=..., y=..., z=...)` for an ellipse or
+circle contour. The two-argument and keyword forms match the contour-solver
+convention of a center `σ` and scalar or length-two `radius`.
+"""
+function contour_boundary(contour::EllipseContour; n::Integer=100, closed::Bool=true)
+    n > 0 || error("n must be positive")
+    last_theta = closed ? 2*pi : 2*pi*(n - 1)/n
+    theta = range(0, stop=last_theta, length=closed ? n + 1 : n)
+    z = [contour.center + complex(contour.radius[1]*cos(t), contour.radius[2]*sin(t))
+         for t in theta]
+    return _boundary_tuple(z)
+end
+
+contour_boundary(center::Number, radius; params...) =
+    contour_boundary(EllipseContour(center, radius); params...)
+
+contour_boundary(; σ, radius, params...) =
+    contour_boundary(σ, radius; params...)
+
+_path_id(path::Tuple{}) = "root"
+_path_id(path::Tuple) = join(path, ".")
+
+function _validate_depth(depth)
+    depth >= 0 || error("depth must be nonnegative")
+    return Int(depth)
+end
+
+function _validate_path(path)
+    all(i -> i isa Integer && 1 <= i <= 4, path) ||
+        error("selected paths must contain child indices between 1 and 4")
+    return Tuple(Int(i) for i in path)
+end
+
+function _normalize_selected_paths(selected)
+    selected === nothing && return nothing
+    if selected isa Tuple
+        return [_validate_path(selected)]
+    elseif selected isa AbstractVector && all(i -> i isa Integer, selected)
+        return [_validate_path(selected)]
+    elseif selected isa AbstractVector
+        return [_validate_path(path) for path in selected]
+    else
+        error("selected must be a path tuple or a vector of path tuples")
+    end
+end
+
+function _region_at_path(region, path::Tuple)
+    current = region
+    for child_index in path
+        current = subdivide(current)[child_index]
+    end
+    return current
+end
+
+function _selected_prefixes(selected_paths)
+    paths = Set{Tuple}()
+    push!(paths, ())
+    for path in selected_paths
+        for i = 1:length(path)
+            push!(paths, path[1:i])
+        end
+    end
+    sorted_paths = collect(paths)
+    sort!(sorted_paths, by=path -> (length(path), _path_id(path)))
+    return sorted_paths
+end
+
+function _region_entries(region, depth::Integer, selected)
+    selected_paths = _normalize_selected_paths(selected)
+    if selected_paths !== nothing
+        return [(region=_region_at_path(region, path), path=path)
+                for path in _selected_prefixes(selected_paths)]
+    end
+
+    entries = []
+    function visit(current_region, path)
+        push!(entries, (region=current_region, path=path))
+        length(path) == depth && return
+        for (child_index, child) in enumerate(subdivide(current_region))
+            visit(child, (path..., child_index))
+        end
+    end
+    visit(region, ())
+    return entries
+end
+
+function _region_metadata(region, path::Tuple)
+    return (region=region,
+            level=length(path),
+            path=path,
+            id=_path_id(path),
+            parent_id=isempty(path) ? nothing : _path_id(path[1:end-1]),
+            child_index=isempty(path) ? nothing : last(path))
+end
+
+"""
+    collect_region_boundaries(root_region; depth=0, selected=nothing, n=2)
+
+Return boundary coordinates and hierarchy metadata for a region subdivision.
+If `selected` is supplied as a child-index path such as `(1, 4)`, or a vector
+of paths such as `[(1,), (2, 3)]`, the root and all selected path prefixes are
+returned.
+"""
+function collect_region_boundaries(
+    root_region::Union{SquareRegion,RectangularRegion};
+    depth::Integer=0,
+    selected=nothing,
+    n::Integer=2
+)
+    depth = _validate_depth(depth)
+    return [begin
+                boundary = region_boundary(entry.region; n=n)
+                merge(_region_metadata(entry.region, entry.path), boundary)
+            end for entry in _region_entries(root_region, depth, selected)]
+end
+
+"""
+    collect_contour_boundaries(root_region; depth=0, selected=nothing, n=100, shape=:circle)
+
+Return enclosing contour coordinates and hierarchy metadata for a region
+subdivision. Contours are created with `enclosing_contour(region; shape=shape)`.
+"""
+function collect_contour_boundaries(
+    root_region::Union{SquareRegion,RectangularRegion};
+    depth::Integer=0,
+    selected=nothing,
+    n::Integer=100,
+    shape=:circle
+)
+    depth = _validate_depth(depth)
+    return [begin
+                contour = enclosing_contour(entry.region; shape=shape)
+                boundary = contour_boundary(contour; n=n)
+                merge(merge(_region_metadata(entry.region, entry.path), (contour=contour,)), boundary)
+            end for entry in _region_entries(root_region, depth, selected)]
 end
 
 function _unit_probe(::Type{T}, n::Integer; probe=nothing, seed=10) where {T<:Number}

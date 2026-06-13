@@ -96,6 +96,10 @@ enclosing_contour
 contour_parameters
 inside_region
 subdivide
+region_boundary
+contour_boundary
+collect_region_boundaries
+collect_contour_boundaries
 sim_indicator
 sim_screen
 sim_screen_regions
