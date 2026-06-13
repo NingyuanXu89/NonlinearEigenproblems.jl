@@ -44,6 +44,61 @@ end
     @test all(child -> child.half_width == rect.half_width / 2, rect_children)
     @test all(child -> child.half_height == rect.half_height / 2, rect_children)
     @test all(child -> inside_region(rect, child.center), rect_children)
+
+    square_boundary = region_boundary(square; n=2)
+    @test square_boundary.z == [0.5 + 1.5im, 1.5 + 1.5im, 1.5 + 2.5im,
+                               0.5 + 2.5im, 0.5 + 1.5im]
+    @test square_boundary.x == real.(square_boundary.z)
+    @test square_boundary.y == imag.(square_boundary.z)
+    @test first(square_boundary.z) == last(square_boundary.z)
+    @test_throws ErrorException region_boundary(square; n=1)
+
+    rect_boundary = region_boundary(rect; n=3)
+    @test length(rect_boundary.z) == 9
+    @test extrema(rect_boundary.x) == (-1.0, 3.0)
+    @test extrema(rect_boundary.y) == (-1.25, -0.75)
+
+    contour = EllipseContour(1 + 2im, (2.0, 1.0))
+    contour_closed = contour_boundary(contour; n=4)
+    @test length(contour_closed.z) == 5
+    @test contour_closed.z ≈ [3 + 2im, 1 + 3im, -1 + 2im, 1 + 1im, 3 + 2im]
+    @test first(contour_closed.z) ≈ last(contour_closed.z)
+
+    contour_open = contour_boundary(contour; n=4, closed=false)
+    @test length(contour_open.z) == 4
+    @test first(contour_open.z) != last(contour_open.z)
+    @test contour_boundary(1 + 2im, (2.0, 1.0); n=4).z ≈ contour_closed.z
+    @test contour_boundary(; σ=1 + 2im, radius=(2.0, 1.0), n=4).z ≈ contour_closed.z
+    @test_throws ErrorException contour_boundary(contour; n=0)
+
+    depth_records = collect_region_boundaries(square; depth=1)
+    @test length(depth_records) == 5
+    @test getproperty.(depth_records, :id) == ["root", "1", "2", "3", "4"]
+    @test getproperty.(depth_records, :level) == [0, 1, 1, 1, 1]
+    @test depth_records[1].parent_id === nothing
+    @test depth_records[2].parent_id == "root"
+    @test depth_records[2].child_index == 1
+    @test depth_records[2].region.center == 1.25 + 2.25im
+
+    selected_records = collect_region_boundaries(square; selected=(1, 4))
+    @test getproperty.(selected_records, :id) == ["root", "1", "1.4"]
+    @test selected_records[3].parent_id == "1"
+    @test selected_records[3].child_index == 4
+    @test selected_records[3].region.center == 1.125 + 2.125im
+    @test getproperty.(collect_region_boundaries(square; selected=[(1,), (2, 3)]), :id) ==
+        ["root", "1", "2", "2.3"]
+    @test_throws ErrorException collect_region_boundaries(square; depth=-1)
+    @test_throws ErrorException collect_region_boundaries(square; selected=(5,))
+
+    default_contours = collect_contour_boundaries(rect; n=4)
+    @test length(default_contours) == 1
+    @test default_contours[1].id == "root"
+    @test default_contours[1].contour.radius[1] ≈ sqrt(rect.half_width^2 + rect.half_height^2)
+    @test default_contours[1].contour.radius[1] == default_contours[1].contour.radius[2]
+    @test length(default_contours[1].z) == 5
+
+    ellipse_contours = collect_contour_boundaries(rect; n=4, shape=:ellipse)
+    @test ellipse_contours[1].contour.radius == (rect.half_width, rect.half_height)
 end
 
 @testset "SIM indicator and screening" begin

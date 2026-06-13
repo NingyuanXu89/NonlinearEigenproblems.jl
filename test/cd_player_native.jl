@@ -8,12 +8,13 @@ using LinearAlgebra
     n = size(nep, 1)
 
     (Λ,V)=polyeig(nep)
+    λ0 = Λ[1] + 1e-8 + 1e-8im
 
-    (λ,v)=quasinewton(nep,λ=Λ[1],v=V[:,1],logger=displaylevel, armijo_factor=0.2,armijo_max=10, tol=1e-17)
+    (λ,v)=quasinewton(nep,λ=λ0,v=V[:,1],logger=displaylevel, armijo_factor=0.2,armijo_max=10, tol=1e-17)
 
     verify_lambdas(1, nep, λ, v, 1e-9)
 
-    (λ,v)=resinv(nep,λ=Λ[1],v=V[:,1],logger=displaylevel, armijo_factor=0.2,armijo_max=10, tol=1e-17)
+    (λ,v)=resinv(nep,λ=λ0,v=V[:,1],logger=displaylevel, armijo_factor=0.2,armijo_max=10, tol=1e-17)
     verify_lambdas(1, nep, λ, v, 1e-9)
 
     @testset "Errors thrown" begin

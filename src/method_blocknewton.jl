@@ -169,12 +169,13 @@ function newtonstep_linsys(::Type{T},nep::AbstractSPMF,S, X, W, RT, RV, logger) 
 
         # Construct the matrix in equation (20) in Kressner Num. Math.
         T11=compute_Mder(nep,s)
-        S_expanded = [S I; zero(S) s*I]
+        Ip = Matrix{T}(I,p,p)
+        S_expanded = [S Ip; zero(S) s*Ip]
         # T12 = compute_MM(nep,[0*X X],S_expanded) # Can maybe be computed like this? Would avoid the explicit use of Av and and fv
         T12 = zeros(T,n,p);
         for j = 1:m
             DF = fv[j](S_expanded)
-            DF1=DF[1:p,p+1:2*p];
+            DF1 = Matrix(DF)[1:p,p+1:2*p];
             T12 = T12 + Av[j]*X*DF1;
         end
         T21 = W[:,:,1]';

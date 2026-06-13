@@ -64,7 +64,7 @@ end
 Random.seed!(0);
 TOL = 1e-10
 nep = nep_gallery("pep0",250)
-λ, u = jd_effenberger(nep, neigs=5, logger=displaylevel, tol=TOL, maxit=80, λ=0.82+0.9im, v=ones(ComplexF64,size(nep,1)))
+λ, u = jd_effenberger(nep, neigs=5, logger=displaylevel, tol=TOL, maxit=160, λ=0.82+0.9im, v=ones(ComplexF64,size(nep,1)))
 verify_lambdas(5, nep, λ, u, TOL)
 
 Random.seed!(0);
