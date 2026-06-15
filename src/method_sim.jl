@@ -6,6 +6,7 @@ export SIMResult, SIMContourDecision
 export enclosing_contour, contour_parameters, inside_region, subdivide
 export region_boundary, contour_boundary, collect_region_boundaries, collect_contour_boundaries
 export sim_indicator, sim_screen, sim_screen_regions, sim_contour_decision
+export sim_subdivide_active_regions
 
 """
     SquareRegion(center, half_side)
@@ -46,8 +47,17 @@ end
 """
     SIMResult
 
-Result of SIM screening for one region. `indicator` is the Xi-Sun
-projection-ratio screening value only; it is not an eigenvalue count.
+Result of SIM screening for one region. `indicator` is a method-specific
+screening value only; it is not an eigenvalue count and inactive results are
+not empty-region certificates.
+
+The first six fields are kept for compatibility:
+`region`, `indicator`, `active`, `threshold`, `N`, and `probe_norm`.
+Additional method-specific information is stored in `diagnostics`, including
+`method`, `K`, `k`, moment norms/strengths/singular values when available,
+`seed`, and the enclosing contour center/radius. Six-argument construction
+`SIMResult(region, indicator, active, threshold, N, probe_norm)` remains
+available and creates legacy `method=:xisun` diagnostics.
 """
 struct SIMResult{T<:Real,R}
     region::R
@@ -56,6 +66,40 @@ struct SIMResult{T<:Real,R}
     threshold::T
     N::Int
     probe_norm::T
+    diagnostics::NamedTuple
+end
+
+function _sim_default_diagnostics(region; method=:xisun, K::Integer=0, k::Integer=1,
+                                  seed=10, moment_strengths=Float64[],
+                                  moment_norms=Float64[],
+                                  moment_singular_values=Vector{Vector{Float64}}())
+    contour = region isa Union{SquareRegion,RectangularRegion} ?
+        enclosing_contour(region; shape=:circle) : nothing
+    return (method=method,
+            K=Int(K),
+            k=Int(k),
+            moment_strengths=moment_strengths,
+            moment_norms=moment_norms,
+            moment_singular_values=moment_singular_values,
+            seed=seed,
+            contour_center=contour === nothing ? nothing : contour.center,
+            contour_radius=contour === nothing ? nothing : contour.radius)
+end
+
+function SIMResult(region, indicator::Real, active::Bool, threshold::Real,
+                   N::Integer, probe_norm::Real)
+    T = promote_type(typeof(indicator), typeof(threshold), typeof(probe_norm))
+    return SIMResult{T,typeof(region)}(region, T(indicator), active, T(threshold),
+                                       Int(N), T(probe_norm),
+                                       _sim_default_diagnostics(region))
+end
+
+function SIMResult(region, indicator::Real, active::Bool, threshold::Real,
+                   N::Integer, probe_norm::Real,
+                   diagnostics::NamedTuple)
+    T = promote_type(typeof(indicator), typeof(threshold), typeof(probe_norm))
+    return SIMResult{T,typeof(region)}(region, T(indicator), active, T(threshold),
+                                       Int(N), T(probe_norm), diagnostics)
 end
 
 """
@@ -404,12 +448,86 @@ function _projection_ratio_indicator(full_grid, half_grid)
     return real(norm(ratios) / sqrt(length(full_grid)))
 end
 
-"""
-    sim_indicator(nep, region; N=16, linsolvercreator=BackslashLinSolverCreator(), probe=nothing, seed=10)
+function _sim_moment_norm_data(
+    ::Type{T},
+    nep::NEP,
+    region::Union{SquareRegion,RectangularRegion};
+    N::Integer,
+    k::Integer,
+    K::Integer,
+    linsolvercreator,
+    probe=nothing,
+    seed=10,
+    compute_singular_values::Bool=false
+) where {T<:Number}
+    N > 0 || error("N must be positive")
+    k > 0 || error("k must be positive")
+    k <= N || error("k must be smaller or equal to N")
+    K >= 0 || error("K must be nonnegative")
+    K <= 3 || error("K must be at most 3 for moment_norm SIM screening")
 
-Compute the Xi-Sun SIM projection-ratio indicator for active/inactive region
-screening. The returned scalar is not an eigenvalue count and no eigenpairs are
-computed. Use `sim_screen` to apply a threshold.
+    n = size(nep, 1)
+    if probe === nothing
+        rng = MersenneTwister(seed)
+        V = Array{T,2}(randn(rng, real(T), n, k))
+    elseif probe isa AbstractVector
+        k == 1 || error("vector probe requires k=1")
+        length(probe) == n || error("probe length must match the NEP size")
+        V = reshape(Vector{T}(probe), n, 1)
+    elseif probe isa AbstractMatrix
+        size(probe) == (n, k) || error("probe matrix size must be (n, k)")
+        V = Matrix{T}(probe)
+    else
+        error("probe must be a vector, matrix, or nothing")
+    end
+
+    probe_norm = real(norm(V))
+    probe_norm > 0 || error("probe block must be nonzero")
+
+    contour = enclosing_contour(region; shape=:circle)
+    center = contour.center
+    radius = contour.radius[1]
+    radius_scale = maximum(contour.radius)
+    moments = [zeros(T, n, k) for _ = 0:K]
+
+    for j = 1:N
+        theta = 2*pi*(j - 1)/N
+        phase = exp(im*theta)
+        shifted = radius * phase
+        z = center + shifted
+        solver = create_linsolver(linsolvercreator, nep, z)
+        solved = lin_solve(solver, V)
+        weight = radius * phase / N
+        shifted_power = one(shifted)
+        for ell = 0:K
+            moments[ell + 1] .+= weight * shifted_power .* solved
+            shifted_power *= shifted
+        end
+    end
+
+    moment_norms = real.([norm(S) for S in moments])
+    moment_strengths = [moment_norms[ell + 1] / (radius_scale^ell * probe_norm)
+                        for ell = 0:K]
+    moment_singular_values = compute_singular_values ?
+        [svdvals(S) for S in moments] : Vector{Vector{Float64}}()
+    indicator = maximum(moment_strengths)
+    diagnostics = _sim_default_diagnostics(region; method=:moment_norm, K=K, k=k,
+                                           seed=seed,
+                                           moment_strengths=moment_strengths,
+                                           moment_norms=moment_norms,
+                                           moment_singular_values=moment_singular_values)
+    return (indicator=indicator, probe_norm=probe_norm, diagnostics=diagnostics)
+end
+
+"""
+    sim_indicator(nep, region; N=16, method=:xisun, ...)
+
+Compute a scalar SIM screening indicator without computing eigenpairs.
+`method=:xisun` uses the fast legacy Xi-Sun / pmCIM projection-ratio screen.
+`method=:moment_norm` uses low-order shifted contour moment norms with
+keywords `k`, `K`, and `seed`. Thresholds are method-specific, and neither
+method proves that an inactive region is empty. Use `sim_screen` to apply a
+threshold.
 """
 function sim_indicator(
     nep::NEP,
@@ -417,21 +535,38 @@ function sim_indicator(
     N::Integer=16,
     linsolvercreator=BackslashLinSolverCreator(),
     probe=nothing,
-    seed=10
+    seed=10,
+    method=:xisun,
+    k::Integer=1,
+    K::Integer=3
 )
-    full_grid, half_grid, _ = _sim_circle_sums(ComplexF64, nep, region;
-                                               N=N,
-                                               linsolvercreator=linsolvercreator,
-                                               probe=probe,
-                                               seed=seed)
-    return _projection_ratio_indicator(full_grid, half_grid)
+    if method == :xisun
+        full_grid, half_grid, _ = _sim_circle_sums(ComplexF64, nep, region;
+                                                   N=N,
+                                                   linsolvercreator=linsolvercreator,
+                                                   probe=probe,
+                                                   seed=seed)
+        return _projection_ratio_indicator(full_grid, half_grid)
+    elseif method == :moment_norm
+        data = _sim_moment_norm_data(ComplexF64, nep, region;
+                                     N=N, k=k, K=K,
+                                     linsolvercreator=linsolvercreator,
+                                     probe=probe, seed=seed,
+                                     compute_singular_values=false)
+        return data.indicator
+    else
+        error("unknown SIM method: $method")
+    end
 end
 
 """
     sim_screen(nep, region; N=16, threshold=0.1, ...)
 
 Compute `sim_indicator` and return a `SIMResult` with `active =
-indicator > threshold`.
+indicator > threshold`. The returned diagnostics record the screening method,
+seed, enclosing contour, and moment diagnostics for `method=:moment_norm`.
+SIM is a screening heuristic; final eigenvalues should be recovered with
+Beyn/block SS and validated separately.
 """
 function sim_screen(
     nep::NEP,
@@ -440,30 +575,55 @@ function sim_screen(
     threshold::Real=0.1,
     linsolvercreator=BackslashLinSolverCreator(),
     probe=nothing,
-    seed=10
+    seed=10,
+    method=:xisun,
+    k::Integer=1,
+    K::Integer=3
 )
-    full_grid, half_grid, probe_norm = _sim_circle_sums(ComplexF64, nep, region;
-                                                        N=N,
-                                                        linsolvercreator=linsolvercreator,
-                                                        probe=probe,
-                                                        seed=seed)
-    indicator = _projection_ratio_indicator(full_grid, half_grid)
-    Tind = typeof(indicator)
-    return SIMResult(region, indicator, indicator > threshold, Tind(threshold), Int(N), Tind(probe_norm))
+    if method == :xisun
+        full_grid, half_grid, probe_norm = _sim_circle_sums(ComplexF64, nep, region;
+                                                            N=N,
+                                                            linsolvercreator=linsolvercreator,
+                                                            probe=probe,
+                                                            seed=seed)
+        indicator = _projection_ratio_indicator(full_grid, half_grid)
+        Tind = typeof(indicator)
+        diagnostics = _sim_default_diagnostics(region; method=method, seed=seed)
+        return SIMResult(region, indicator, indicator > threshold, Tind(threshold),
+                         Int(N), Tind(probe_norm), diagnostics)
+    elseif method == :moment_norm
+        data = _sim_moment_norm_data(ComplexF64, nep, region;
+                                     N=N, k=k, K=K,
+                                     linsolvercreator=linsolvercreator,
+                                     probe=probe, seed=seed,
+                                     compute_singular_values=true)
+        Tind = typeof(data.indicator)
+        return SIMResult(region, data.indicator, data.indicator > threshold,
+                         Tind(threshold), Int(N), Tind(data.probe_norm),
+                         data.diagnostics)
+    else
+        error("unknown SIM method: $method")
+    end
 end
 
 """
     sim_screen_regions(nep, regions; params...)
 
 Apply `sim_screen` to each region and return a vector of `SIMResult`s.
+All keyword arguments, including `method`, `k`, `K`, `seed`, and `threshold`,
+are forwarded to `sim_screen`.
 """
 sim_screen_regions(nep::NEP, regions; params...) =
     [sim_screen(nep, region; params...) for region in regions]
 
 function _info_field(info, name::Symbol, default)
     info === nothing && return default
-    hasproperty(info, name) || return default
-    return getproperty(info, name)
+    hasproperty(info, name) && return getproperty(info, name)
+    if hasproperty(info, :diagnostics)
+        diagnostics = getproperty(info, :diagnostics)
+        haskey(diagnostics, name) && return getproperty(diagnostics, name)
+    end
+    return default
 end
 
 function _unclear_rank_gap(info)
@@ -486,18 +646,39 @@ function _unclear_rank_gap(info)
 end
 
 """
-    sim_contour_decision(sim_result, contour_info=nothing; capacity_margin=1, residual_tol=nothing)
+    sim_contour_decision(sim_result, contour_info=nothing; capacity_margin=1, residual_tol=nothing, borderline_factor=10)
 
 Policy helper that combines SIM screening with optional contour diagnostics.
-SIM supplies only the active/inactive decision; rank, capacity, and residual
-information are read only from contour diagnostics.
+SIM supplies only heuristic screening information; rank, capacity, and
+residual information are read only from contour diagnostics. Inactive
+`method=:xisun` results return `:legacy_xisun_inactive`. Inactive
+`method=:moment_norm` results return `:moment_norm_inactive`, except values
+within `threshold / borderline_factor` return `:weak_moment_strength` and a
+conservative `:subdivide_or_rerun` action.
 """
 function sim_contour_decision(sim_result::SIMResult, contour_info=nothing;
-                              capacity_margin::Integer=1, residual_tol=nothing)
+                              capacity_margin::Integer=1, residual_tol=nothing,
+                              borderline_factor::Real=10,
+                              target_capacity=nothing)
+    target_capacity === nothing || target_capacity > 0 ||
+        error("target_capacity must be positive")
     if !sim_result.active
-        return SIMContourDecision(:skip, :inactive, NamedTuple())
+        method = _info_field(sim_result, :method, :xisun)
+        if method == :moment_norm
+            borderline_factor > 0 || error("borderline_factor must be positive")
+            if sim_result.indicator >= sim_result.threshold / borderline_factor
+                return SIMContourDecision(:subdivide_or_rerun,
+                                          :weak_moment_strength, NamedTuple())
+            end
+            return SIMContourDecision(:skip, :moment_norm_inactive, NamedTuple())
+        end
+        return SIMContourDecision(:skip, :legacy_xisun_inactive, NamedTuple())
     end
-    contour_info === nothing && return SIMContourDecision(:run_beyn, :active, NamedTuple())
+    if contour_info === nothing
+        method = _info_field(sim_result, :method, :xisun)
+        reason = method == :moment_norm ? :moment_detected : :active
+        return SIMContourDecision(:run_beyn, reason, NamedTuple())
+    end
 
     estimated_rank = _info_field(contour_info, :estimated_rank, 0)
     capacity = _info_field(contour_info, :capacity, 0)
@@ -516,9 +697,155 @@ function sim_contour_decision(sim_result::SIMResult, contour_info=nothing;
         return SIMContourDecision(:subdivide_or_rerun, :unclear_rank_gap, NamedTuple())
     end
 
+    method = _info_field(sim_result, :method, :xisun)
+    if method == :moment_norm && target_capacity !== nothing
+        if estimated_rank <= target_capacity
+            return SIMContourDecision(:accept_region,
+                                      :moment_rank_within_target, NamedTuple())
+        end
+        return SIMContourDecision(:subdivide_or_rerun,
+                                  :moment_rank_above_target, NamedTuple())
+    end
+
     if capacity > 0 && estimated_rank >= capacity - capacity_margin
         return SIMContourDecision(:run_block_SS_or_subdivide, :near_capacity_rank, NamedTuple())
     end
 
     return SIMContourDecision(:accept_beyn, :low_estimated_rank, NamedTuple())
+end
+
+"""
+    sim_subdivide_active_regions(nep, region; N=16, k=2, K=2, threshold,
+                                 seed=10, max_depth=4,
+                                 target_capacity=k*K,
+                                 verify_kwargs=NamedTuple(), strict=true,
+                                 return_trace=false,
+                                 linsolvercreator=BackslashLinSolverCreator())
+
+Subdivide `region` with the low-cost `method=:moment_norm` SIM screen and
+return the accepted active child regions. Far-inactive regions are skipped,
+borderline or over-capacity regions are subdivided while `max_depth` allows,
+and active regions are verified with `contour_block_SS_info` before being
+accepted. The default `target_capacity` is `k*K`, matching the default block
+size passed to the verifier unless `verify_kwargs` overrides `k` or `K`.
+
+SIM inactivity remains a heuristic screen, not a certificate that a region is
+empty. If `max_depth` is reached before a region can be accepted or skipped,
+`strict=true` throws an error; `strict=false` warns and omits that region.
+Set `return_trace=true` to return `(regions=..., trace=...)`, where `trace`
+contains subdivision paths and decisions compatible with
+`collect_region_boundaries(root; selected=...)`.
+"""
+function sim_subdivide_active_regions(
+    nep::NEP,
+    region::Union{SquareRegion,RectangularRegion};
+    N::Integer=16,
+    k::Integer=2,
+    K::Integer=2,
+    threshold,
+    seed::Integer=10,
+    max_depth::Integer=4,
+    target_capacity=k*K,
+    verify_kwargs::NamedTuple=NamedTuple(),
+    strict::Bool=true,
+    return_trace::Bool=false,
+    linsolvercreator=BackslashLinSolverCreator()
+)
+    max_depth >= 0 || error("max_depth must be nonnegative")
+    target_capacity > 0 || error("target_capacity must be positive")
+
+    accepted = typeof(region)[]
+    trace = Any[]
+    queue = Any[(region=region, depth=0, path=())]
+
+    function record_trace!(current_region, depth, path, status, sim,
+                           first_decision, contour_info, final_decision)
+        metadata = _region_metadata(current_region, path)
+        push!(trace, (region=current_region,
+                      depth=depth,
+                      path=path,
+                      id=metadata.id,
+                      parent_id=metadata.parent_id,
+                      child_index=metadata.child_index,
+                      status=status,
+                      sim_result=sim,
+                      first_decision=first_decision,
+                      contour_info=contour_info,
+                      final_decision=final_decision))
+    end
+
+    function subdivide_or_unresolved!(current_region, depth, path, status, sim,
+                                      first_decision, contour_info, final_decision)
+        if depth < max_depth
+            for (child_index, child) in enumerate(subdivide(current_region))
+                push!(queue, (region=child, depth=depth + 1,
+                              path=(path..., child_index)))
+            end
+            record_trace!(current_region, depth, path, status, sim,
+                          first_decision, contour_info, final_decision)
+        elseif strict
+            record_trace!(current_region, depth, path, :error_unresolved, sim,
+                          first_decision, contour_info, final_decision)
+            error("SIM subdivision reached max_depth=$max_depth with unresolved " *
+                  "region; reason=$(final_decision.reason)")
+        else
+            record_trace!(current_region, depth, path, :omitted_unresolved, sim,
+                          first_decision, contour_info, final_decision)
+            @warn "omitting unresolved SIM subdivision region" reason=final_decision.reason depth max_depth
+        end
+    end
+
+    while !isempty(queue)
+        current = popfirst!(queue)
+        current_region = current.region
+        depth = current.depth
+        path = current.path
+
+        sim = sim_screen(nep, current_region;
+                         method=:moment_norm, N=N, k=k, K=K,
+                         threshold=threshold, seed=seed,
+                         linsolvercreator=linsolvercreator)
+        first_decision = sim_contour_decision(sim)
+        if first_decision.action == :skip
+            record_trace!(current_region, depth, path, :skipped_inactive, sim,
+                          first_decision, nothing, nothing)
+            continue
+        elseif first_decision.reason == :weak_moment_strength
+            subdivide_or_unresolved!(current_region, depth, path,
+                                     :subdivided_borderline, sim,
+                                     first_decision, nothing, first_decision)
+            continue
+        end
+
+        contour = enclosing_contour(current_region; shape=:circle)
+        params = contour_parameters(contour)
+        merged_verify_kwargs = merge((; seed=seed, k=k, K=K,
+                                      linsolvercreator=linsolvercreator),
+                                     verify_kwargs)
+        info = contour_block_SS_info(nep; params..., merged_verify_kwargs...)
+        final_decision = sim_contour_decision(sim, info;
+                                              target_capacity=target_capacity)
+        if final_decision.action == :accept_region
+            push!(accepted, current_region)
+            record_trace!(current_region, depth, path, :accepted, sim,
+                          first_decision, info, final_decision)
+        elseif final_decision.action == :subdivide_or_rerun ||
+                final_decision.action == :run_block_SS_or_subdivide
+            status = final_decision.reason == :moment_rank_above_target ?
+                :subdivided_over_target : :subdivided_unreliable
+            subdivide_or_unresolved!(current_region, depth, path, status, sim,
+                                     first_decision, info, final_decision)
+        elseif strict
+            record_trace!(current_region, depth, path, :error_unresolved, sim,
+                          first_decision, info, final_decision)
+            error("unexpected SIM subdivision decision: action=$(final_decision.action), " *
+                  "reason=$(final_decision.reason)")
+        else
+            record_trace!(current_region, depth, path, :omitted_unresolved, sim,
+                          first_decision, info, final_decision)
+            @warn "omitting region with unexpected SIM subdivision decision" action=final_decision.action reason=final_decision.reason depth
+        end
+    end
+
+    return return_trace ? (regions=accepted, trace=trace) : accepted
 end

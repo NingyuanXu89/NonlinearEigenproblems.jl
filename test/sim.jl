@@ -129,9 +129,13 @@ end
     inactive_region = SquareRegion(2 + 0im, 0.1)
 
     @test sim_indicator(nep, active_region, N=16) ≈ 1 atol=1e-12
+    @test sim_indicator(nep, active_region, N=16, method=:xisun) ==
+        sim_indicator(nep, active_region, N=16)
     @test sim_indicator(nep, inactive_region, N=16) < 0.1
 
     active = sim_screen(nep, active_region, N=16, threshold=0.1)
+    active_xisun = sim_screen(nep, active_region, N=16, threshold=0.1,
+                              method=:xisun)
     inactive = sim_screen(nep, inactive_region, N=16, threshold=0.1)
     @test active.region == active_region
     @test active.active
@@ -140,13 +144,132 @@ end
     @test active.threshold == 0.1
     @test active.N == 16
     @test active.indicator == sim_indicator(nep, active_region, N=16)
+    @test active_xisun.indicator == active.indicator
+    @test active_xisun.active == active.active
+    @test active_xisun.threshold == active.threshold
+    @test active_xisun.N == active.N
+    @test active_xisun.probe_norm == active.probe_norm
     @test_throws MethodError sim_indicator(nep, active_region, N=16, threshold=0.1)
+    @test_throws ErrorException sim_indicator(nep, active_region, N=16,
+                                              method=:unknown)
+    @test_throws ErrorException sim_screen(nep, active_region, N=16,
+                                           method=:unknown)
 
     rect = RectangularRegion(λ0, 0.2, 0.05)
     @test sim_screen(nep, rect, N=16).active
 
     results = sim_screen_regions(nep, [active_region, inactive_region], N=16)
     @test map(r -> r.active, results) == [true, false]
+end
+
+@testset "SIM diagnostics plumbing" begin
+    nep = diagonal_linear_pep([0.2 + 0.1im])
+    region = SquareRegion(0.2 + 0.1im, 0.1)
+    contour = enclosing_contour(region; shape=:circle)
+
+    result = sim_screen(nep, region, N=16, seed=99, method=:xisun)
+    @test result.diagnostics.method == :xisun
+    @test result.diagnostics.K == 0
+    @test result.diagnostics.k == 1
+    @test isempty(result.diagnostics.moment_strengths)
+    @test isempty(result.diagnostics.moment_norms)
+    @test isempty(result.diagnostics.moment_singular_values)
+    @test result.diagnostics.seed == 99
+    @test result.diagnostics.contour_center == contour.center
+    @test result.diagnostics.contour_radius == contour.radius
+
+    legacy = SIMResult(region, result.indicator, result.active, result.threshold,
+                       result.N, result.probe_norm)
+    @test legacy.indicator == result.indicator
+    @test legacy.active == result.active
+    @test legacy.diagnostics.method == :xisun
+    @test legacy.diagnostics.seed == 10
+end
+
+@testset "SIM moment_norm screening" begin
+    λ0 = 0.2 + 0.1im
+    nep = diagonal_linear_pep([λ0, -0.3 + 0.2im])
+    active_region = SquareRegion(λ0, 0.1)
+    inactive_region = SquareRegion(2 + 0im, 0.1)
+    contour = enclosing_contour(active_region; shape=:circle)
+
+    result = sim_screen(nep, active_region, N=16, method=:moment_norm,
+                        k=2, K=2, seed=11, threshold=0.1)
+    @test result isa SIMResult
+    @test result.diagnostics.method == :moment_norm
+    @test result.diagnostics.K == 2
+    @test result.diagnostics.k == 2
+    @test length(result.diagnostics.moment_strengths) == 3
+    @test length(result.diagnostics.moment_norms) == 3
+    @test length(result.diagnostics.moment_singular_values) == 3
+    @test all(isfinite, result.diagnostics.moment_strengths)
+    @test all(isfinite, result.diagnostics.moment_norms)
+    @test all(result.diagnostics.moment_strengths .>= 0)
+    @test all(result.diagnostics.moment_norms .>= 0)
+    @test result.diagnostics.seed == 11
+    @test result.diagnostics.contour_center == contour.center
+    @test result.diagnostics.contour_radius == contour.radius
+    @test result.indicator == maximum(result.diagnostics.moment_strengths)
+
+    @test sim_indicator(nep, active_region, N=16, method=:moment_norm,
+                        k=2, K=2, seed=11) == result.indicator
+
+    repeated = sim_screen(nep, active_region, N=16, method=:moment_norm,
+                          k=2, K=2, seed=11, threshold=0.1)
+    changed = sim_screen(nep, active_region, N=16, method=:moment_norm,
+                         k=2, K=2, seed=12, threshold=0.1)
+    @test repeated.diagnostics.moment_strengths == result.diagnostics.moment_strengths
+    @test repeated.diagnostics.moment_norms == result.diagnostics.moment_norms
+    @test repeated.diagnostics.moment_singular_values ==
+        result.diagnostics.moment_singular_values
+    @test changed.diagnostics.moment_strengths != result.diagnostics.moment_strengths
+
+    Random.seed!(1234)
+    expected_first = rand()
+    expected_second = rand()
+    Random.seed!(1234)
+    @test rand() == expected_first
+    sim_screen(nep, active_region, N=16, method=:moment_norm,
+               k=2, K=2, seed=99)
+    @test rand() == expected_second
+
+    active_indicator = sim_indicator(nep, active_region, N=16,
+                                     method=:moment_norm, k=2, K=2, seed=21)
+    inactive_indicator = sim_indicator(nep, inactive_region, N=16,
+                                       method=:moment_norm, k=2, K=2, seed=21)
+    @test active_indicator > inactive_indicator
+    threshold = (active_indicator + inactive_indicator) / 2
+    @test sim_screen(nep, active_region, N=16, method=:moment_norm,
+                     k=2, K=2, seed=21, threshold=threshold).active
+    @test !sim_screen(nep, inactive_region, N=16, method=:moment_norm,
+                      k=2, K=2, seed=21, threshold=threshold).active
+
+    explicit_vector = ComplexF64[2, 0]
+    vector_result = sim_screen(nep, active_region, N=16, method=:moment_norm,
+                               k=1, K=1, probe=explicit_vector)
+    @test vector_result.probe_norm == norm(explicit_vector)
+
+    explicit_matrix = ComplexF64[1 0; 0 1]
+    matrix_result = sim_screen(nep, active_region, N=16, method=:moment_norm,
+                               k=2, K=1, probe=explicit_matrix)
+    @test matrix_result.probe_norm == norm(explicit_matrix)
+
+    @test_throws ErrorException sim_indicator(nep, active_region, N=0,
+                                              method=:moment_norm)
+    @test_throws ErrorException sim_indicator(nep, active_region, N=16,
+                                              method=:moment_norm, k=0)
+    @test_throws ErrorException sim_indicator(nep, active_region, N=1,
+                                              method=:moment_norm, k=2)
+    @test_throws ErrorException sim_indicator(nep, active_region, N=16,
+                                              method=:moment_norm, K=-1)
+    @test_throws ErrorException sim_indicator(nep, active_region, N=16,
+                                              method=:moment_norm, K=4)
+    @test_throws ErrorException sim_indicator(nep, active_region, N=16,
+                                              method=:moment_norm, k=2,
+                                              probe=explicit_vector)
+    @test_throws ErrorException sim_indicator(nep, active_region, N=16,
+                                              method=:moment_norm, k=2,
+                                              probe=ones(ComplexF64, 3, 2))
 end
 
 @testset "SIM probe and validation" begin
@@ -183,12 +306,83 @@ end
 
     skipped = sim_contour_decision(inactive)
     @test skipped.action == :skip
-    @test skipped.reason == :inactive
+    @test skipped.reason == :legacy_xisun_inactive
     @test skipped.recommended_kwargs == NamedTuple()
 
     no_info = sim_contour_decision(active)
     @test no_info.action == :run_beyn
     @test no_info.reason == :active
+
+    nep = diagonal_linear_pep([0.2 + 0.1im, -0.3 + 0.2im])
+    region = SquareRegion(0.2 + 0.1im, 0.1)
+    moment_indicator = sim_indicator(nep, region, N=16, method=:moment_norm,
+                                     k=2, K=2, seed=3)
+
+    active_moment = sim_screen(nep, region, N=16, method=:moment_norm,
+                               k=2, K=2, seed=3,
+                               threshold=moment_indicator / 2)
+    moment_no_info = sim_contour_decision(active_moment)
+    @test moment_no_info.action == :run_beyn
+    @test moment_no_info.reason == :moment_detected
+
+    far_inactive_moment = sim_screen(nep, region, N=16, method=:moment_norm,
+                                     k=2, K=2, seed=3,
+                                     threshold=20 * moment_indicator)
+    far_decision = sim_contour_decision(far_inactive_moment)
+    @test far_decision.action == :skip
+    @test far_decision.reason == :moment_norm_inactive
+
+    borderline_moment = sim_screen(nep, region, N=16, method=:moment_norm,
+                                   k=2, K=2, seed=3,
+                                   threshold=5 * moment_indicator)
+    borderline_decision = sim_contour_decision(borderline_moment)
+    @test borderline_decision.action == :subdivide_or_rerun
+    @test borderline_decision.reason == :weak_moment_strength
+
+    no_longer_borderline = sim_contour_decision(borderline_moment;
+                                                borderline_factor=2)
+    @test no_longer_borderline.action == :skip
+    @test no_longer_borderline.reason == :moment_norm_inactive
+
+    moment_within_target_info = (; estimated_rank=3, capacity=10, number_returned=3,
+                                 residuals=[1e-12], singular_values=[1.0, 1e-2, 1e-12],
+                                 rank_drop_tol=1e-8)
+    within_target = sim_contour_decision(active_moment, moment_within_target_info;
+                                         target_capacity=3, residual_tol=1e-8)
+    @test within_target.action == :accept_region
+    @test within_target.reason == :moment_rank_within_target
+
+    above_target_info = (; estimated_rank=4, capacity=10, number_returned=4,
+                         residuals=[1e-12], singular_values=[1.0, 1e-2, 1e-3, 1e-12],
+                         rank_drop_tol=1e-8)
+    above_target = sim_contour_decision(active_moment, above_target_info;
+                                        target_capacity=3, residual_tol=1e-8)
+    @test above_target.action == :subdivide_or_rerun
+    @test above_target.reason == :moment_rank_above_target
+
+    moment_no_pairs = (; estimated_rank=3, capacity=10, number_returned=0,
+                       residuals=Float64[], singular_values=[1.0, 1e-2, 1e-12],
+                       rank_drop_tol=1e-8)
+    @test sim_contour_decision(active_moment, moment_no_pairs;
+                               target_capacity=3).reason == :active_no_eigenpairs
+
+    moment_poor_residuals = (; estimated_rank=3, capacity=10, number_returned=3,
+                             residuals=[1e-2],
+                             singular_values=[1.0, 1e-2, 1e-12],
+                             rank_drop_tol=1e-8)
+    @test sim_contour_decision(active_moment, moment_poor_residuals;
+                               target_capacity=3, residual_tol=1e-8).reason ==
+        :poor_residuals
+
+    moment_unclear_rank = (; estimated_rank=1, capacity=10, number_returned=1,
+                           residuals=[1e-12], singular_values=[1.0, 1e-8],
+                           rank_drop_tol=1e-8)
+    @test sim_contour_decision(active_moment, moment_unclear_rank;
+                               target_capacity=3).reason == :unclear_rank_gap
+
+    @test_throws ErrorException sim_contour_decision(active_moment,
+                                                     moment_within_target_info;
+                                                     target_capacity=0)
 
     low_rank = (; estimated_rank=1, capacity=4, number_returned=1,
                 residuals=[1e-12], singular_values=[1.0, 1e-12, 1e-14],
@@ -196,6 +390,12 @@ end
     accepted = sim_contour_decision(active, low_rank; residual_tol=1e-8)
     @test accepted.action == :accept_beyn
     @test accepted.reason == :low_estimated_rank
+
+    xisun_with_target = sim_contour_decision(active, low_rank;
+                                             residual_tol=1e-8,
+                                             target_capacity=1)
+    @test xisun_with_target.action == accepted.action
+    @test xisun_with_target.reason == accepted.reason
 
     near_capacity = (; estimated_rank=3, capacity=4, number_returned=3,
                      residuals=[1e-12], singular_values=[1.0, 1e-2, 1e-4, 1e-12],
@@ -237,4 +437,115 @@ end
     missing_returned_decision = sim_contour_decision(active, missing_number_returned)
     @test missing_returned_decision.action == :accept_beyn
     @test missing_returned_decision.reason != :active_no_eigenpairs
+end
+
+@testset "SIM auto-subdivision helper" begin
+    λs = [-0.5 - 0.5im, -0.5 + 0.5im, 0.5 - 0.5im, 0.5 + 0.5im]
+    nep = diagonal_linear_pep(λs)
+    root = SquareRegion(0, 1.0)
+    empty_region = SquareRegion(3 + 0im, 0.2)
+    screen_N = 16
+    screen_k = 1
+    screen_K = 1
+    target_capacity = screen_k * screen_K
+    verify_kwargs = (; k=4, K=1, N=64, rank_drop_tol=1e-8)
+
+    regions = sim_subdivide_active_regions(nep, root;
+                                           N=screen_N, k=screen_k, K=screen_K,
+                                           threshold=1e-8, seed=4,
+                                           max_depth=2,
+                                           target_capacity=target_capacity,
+                                           verify_kwargs=verify_kwargs)
+    @test !isempty(regions)
+    @test all(region -> region isa Union{SquareRegion,RectangularRegion}, regions)
+    @test all(λ -> any(region -> inside_region(region, λ), regions), λs)
+
+    traced = sim_subdivide_active_regions(nep, root;
+                                          N=screen_N, k=screen_k, K=screen_K,
+                                          threshold=1e-8, seed=4,
+                                          max_depth=2,
+                                          target_capacity=target_capacity,
+                                          verify_kwargs=verify_kwargs,
+                                          return_trace=true)
+    @test traced.regions == regions
+    @test !isempty(traced.trace)
+    @test all(entry -> hasproperty(entry, :path), traced.trace)
+    @test all(entry -> hasproperty(entry, :status), traced.trace)
+    @test all(entry -> hasproperty(entry, :first_decision), traced.trace)
+    @test all(entry -> hasproperty(entry, :final_decision), traced.trace)
+    accepted_trace = filter(entry -> entry.status == :accepted, traced.trace)
+    accepted_paths = getproperty.(accepted_trace, :path)
+    accepted_boundaries = collect_region_boundaries(root; selected=accepted_paths)
+    @test getproperty.(accepted_trace, :region) == traced.regions
+    @test all(path -> path in getproperty.(accepted_boundaries, :path), accepted_paths)
+    @test :subdivided_over_target in getproperty.(traced.trace, :status)
+    @test :accepted in getproperty.(traced.trace, :status)
+
+    for region in regions
+        contour = enclosing_contour(region; shape=:circle)
+        info = contour_block_SS_info(nep; contour_parameters(contour)...,
+                                     seed=4, verify_kwargs...)
+        sim = sim_screen(nep, region; method=:moment_norm,
+                         N=screen_N, k=screen_k, K=screen_K,
+                         threshold=1e-8, seed=4)
+        decision = sim_contour_decision(sim, info;
+                                        target_capacity=target_capacity)
+        @test decision.action == :accept_region
+        @test info.estimated_rank <= target_capacity
+    end
+
+    skipped = sim_subdivide_active_regions(nep, empty_region;
+                                           N=screen_N, k=screen_k, K=screen_K,
+                                           threshold=1e-8, seed=4,
+                                           max_depth=2,
+                                           target_capacity=target_capacity,
+                                           verify_kwargs=verify_kwargs)
+    @test isempty(skipped)
+
+    skipped_trace = sim_subdivide_active_regions(nep, empty_region;
+                                                 N=screen_N, k=screen_k,
+                                                 K=screen_K,
+                                                 threshold=1e-8, seed=4,
+                                                 max_depth=2,
+                                                 target_capacity=target_capacity,
+                                                 verify_kwargs=verify_kwargs,
+                                                 return_trace=true)
+    @test isempty(skipped_trace.regions)
+    @test getproperty.(skipped_trace.trace, :status) == [:skipped_inactive]
+
+    @test_throws ErrorException sim_subdivide_active_regions(nep, root;
+                                                            N=screen_N,
+                                                            k=screen_k,
+                                                            K=screen_K,
+                                                            threshold=1e-8,
+                                                            seed=4,
+                                                            max_depth=0,
+                                                            target_capacity=target_capacity,
+                                                            verify_kwargs=verify_kwargs)
+
+    @test_logs (:warn, r"omitting unresolved SIM subdivision region") begin
+        omitted = sim_subdivide_active_regions(nep, root;
+                                               N=screen_N, k=screen_k,
+                                               K=screen_K,
+                                               threshold=1e-8, seed=4,
+                                               max_depth=0,
+                                               target_capacity=target_capacity,
+                                               verify_kwargs=verify_kwargs,
+                                               strict=false)
+        @test isempty(omitted)
+    end
+
+    @test_logs (:warn, r"omitting unresolved SIM subdivision region") begin
+        omitted_trace = sim_subdivide_active_regions(nep, root;
+                                                     N=screen_N, k=screen_k,
+                                                     K=screen_K,
+                                                     threshold=1e-8, seed=4,
+                                                     max_depth=0,
+                                                     target_capacity=target_capacity,
+                                                     verify_kwargs=verify_kwargs,
+                                                     strict=false,
+                                                     return_trace=true)
+        @test isempty(omitted_trace.regions)
+        @test getproperty.(omitted_trace.trace, :status) == [:omitted_unresolved]
+    end
 end

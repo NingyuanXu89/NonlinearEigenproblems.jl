@@ -47,7 +47,9 @@ of columns in the matrix to be integrated (default `k=neigs+1`). If you give the
 If disabled, the method
 returns `k` (potentially inaccurate) eigpairs. The parameters `errmeasure` and
 `tol` and `rank_drop_tol` are used for the sanity check,
-to extract accurate eigenvalues.
+to extract accurate eigenvalues. The kwarg `seed=10` sets the local random
+number generator seed used for the probe block and does not mutate Julia's
+global RNG state.
 
 # Example
 ```julia-repl
@@ -78,7 +80,8 @@ function contour_beyn(::Type{T},
                       N::Integer=1000,  # Nof quadrature nodes
                       errmeasure::ErrmeasureType = DefaultErrmeasure(nep),
                       sanity_check=true,
-                      rank_drop_tol=tol # Used in sanity checking
+                      rank_drop_tol=tol, # Used in sanity checking
+                      seed::Integer=10
                       )where{T<:Number, MIntegrator<:MatrixIntegrator}
     info = _contour_beyn_info_impl(T, nep, MIntegrator, false;
                                    tol=tol, σ=σ, logger=logger,
@@ -86,7 +89,8 @@ function contour_beyn(::Type{T},
                                    neigs=neigs, k=k, radius=radius, N=N,
                                    errmeasure=errmeasure,
                                    sanity_check=sanity_check,
-                                   rank_drop_tol=rank_drop_tol)
+                                   rank_drop_tol=rank_drop_tol,
+                                   seed=seed)
     return (info.lambda, info.V)
 end
 
@@ -97,7 +101,8 @@ Run Beyn's contour method and return a `ContourBeynInfo` object containing the
 same eigenpairs as `contour_beyn` plus diagnostics: singular values of `A0`,
 estimated rank, rank tolerance, capacity, returned count, residuals, and
 inside-contour flags. The existing `contour_beyn` API and return value are
-unchanged.
+unchanged. The kwarg `seed=10` controls the local probe-block RNG without
+mutating Julia's global RNG state.
 """
 contour_beyn_info(nep::NEP;params...)=contour_beyn_info(ComplexF64,nep;params...)
 contour_beyn_info(nep::NEP,MIntegrator;params...)=contour_beyn_info(ComplexF64,nep,MIntegrator;params...)
@@ -114,7 +119,8 @@ function contour_beyn_info(::Type{T},
                            N::Integer=1000,  # Nof quadrature nodes
                            errmeasure::ErrmeasureType = DefaultErrmeasure(nep),
                            sanity_check=true,
-                           rank_drop_tol=tol # Used in sanity checking
+                           rank_drop_tol=tol, # Used in sanity checking
+                           seed::Integer=10
                            )where{T<:Number, MIntegrator<:MatrixIntegrator}
     return _contour_beyn_info_impl(T, nep, MIntegrator, true;
                                    tol=tol, σ=σ, logger=logger,
@@ -122,7 +128,8 @@ function contour_beyn_info(::Type{T},
                                    neigs=neigs, k=k, radius=radius, N=N,
                                    errmeasure=errmeasure,
                                    sanity_check=sanity_check,
-                                   rank_drop_tol=rank_drop_tol)
+                                   rank_drop_tol=rank_drop_tol,
+                                   seed=seed)
 end
 
 function _contour_beyn_info_impl(::Type{T},
@@ -139,7 +146,8 @@ function _contour_beyn_info_impl(::Type{T},
                                  N::Integer=1000,
                                  errmeasure::ErrmeasureType = DefaultErrmeasure(nep),
                                  sanity_check=true,
-                                 rank_drop_tol=tol
+                                 rank_drop_tol=tol,
+                                 seed::Integer=10
                                  )where{T<:Number, MIntegrator<:MatrixIntegrator}
 
     @parse_logger_param!(logger)
@@ -162,8 +170,8 @@ function _contour_beyn_info_impl(::Type{T},
     end
 
 
-    Random.seed!(10); # Reproducability
-    Vh=Array{T,2}(randn(real(T),n,k)) # randn only works for real
+    rng = MersenneTwister(seed)
+    Vh=Array{T,2}(randn(rng, real(T),n,k)) # randn only works for real
 
 
     function local_linsolve(λ::TT,V::Matrix{TT}) where {TT<:Number}

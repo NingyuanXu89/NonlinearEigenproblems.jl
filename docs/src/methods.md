@@ -104,6 +104,7 @@ sim_indicator
 sim_screen
 sim_screen_regions
 sim_contour_decision
+sim_subdivide_active_regions
 ```
 
 ## Arnoldi and Krylov based methods

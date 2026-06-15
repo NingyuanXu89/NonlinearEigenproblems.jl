@@ -31,13 +31,15 @@ The contour is an ellipse centered at `σ` with radii given in `radius`, or if o
 which is a type inheriting from `MatrixIntegrator`, by default
 `MatrixTrapezoidal`. For a parallell implementation of the
 integrator use `MatrixTrapezoidalParallel`.
- The integer `k`
+The integer `k`
 specifies size of the probe subspace. `N` corresponds to the
 number of quadrature points. The integer L specifies the number of moments.
 Ellipses are the only supported contours. The
 `linsolvercreator` must create a linsolver that can handle (rectangular) matrices
 as right-hand sides, not only vectors. We integrate in complex arithmetic so
-`eltype` must be complex type.
+`eltype` must be complex type. The kwarg `seed=10` sets the local random
+number generator seed used for the `U` and `V` probe blocks and does not mutate
+Julia's global RNG state.
 
 
 
@@ -79,7 +81,8 @@ function contour_block_SS(
     errmeasure::ErrmeasureType = DefaultErrmeasure(nep),
     sanity_check=true,
     Shat_mode=:native, # native or JSIAM-mode
-    rank_drop_tol=tol # Used in sanity checking
+    rank_drop_tol=tol, # Used in sanity checking
+    seed::Integer=10
 )where{T<:Number, MIntegrator<:MatrixIntegrator}
     info = _contour_block_SS_info_impl(T, nep, MIntegrator, false;
                                        tol=tol, σ=σ, logger=logger,
@@ -88,7 +91,8 @@ function contour_block_SS(
                                        K=K, errmeasure=errmeasure,
                                        sanity_check=sanity_check,
                                        Shat_mode=Shat_mode,
-                                       rank_drop_tol=rank_drop_tol)
+                                       rank_drop_tol=rank_drop_tol,
+                                       seed=seed)
     return info.lambda, info.V
 end
 
@@ -99,7 +103,9 @@ Run the block SS contour method and return a `ContourBlockSSInfo` object
 containing the same eigenpairs as `contour_block_SS` plus diagnostics:
 singular values of the block Hankel moment matrix, estimated rank, rank
 tolerance, capacity, returned count, residuals, and inside-contour flags. The
-existing `contour_block_SS` API and return value are unchanged.
+existing `contour_block_SS` API and return value are unchanged. The kwarg
+`seed=10` controls the local `U`/`V` probe-block RNG without mutating Julia's
+global RNG state.
 """
 contour_block_SS_info(nep::NEP;params...)=contour_block_SS_info(ComplexF64,nep;params...);
 contour_block_SS_info(nep::NEP,MIntegrator;params...)=contour_block_SS_info(ComplexF64,nep,MIntegrator;params...);
@@ -119,7 +125,8 @@ function contour_block_SS_info(
     errmeasure::ErrmeasureType = DefaultErrmeasure(nep),
     sanity_check=true,
     Shat_mode=:native, # native or JSIAM-mode
-    rank_drop_tol=tol # Used in sanity checking
+    rank_drop_tol=tol, # Used in sanity checking
+    seed::Integer=10
 )where{T<:Number, MIntegrator<:MatrixIntegrator}
     return _contour_block_SS_info_impl(T, nep, MIntegrator, true;
                                        tol=tol, σ=σ, logger=logger,
@@ -128,7 +135,8 @@ function contour_block_SS_info(
                                        K=K, errmeasure=errmeasure,
                                        sanity_check=sanity_check,
                                        Shat_mode=Shat_mode,
-                                       rank_drop_tol=rank_drop_tol)
+                                       rank_drop_tol=rank_drop_tol,
+                                       seed=seed)
 end
 
 function _contour_block_SS_info_impl(
@@ -148,7 +156,8 @@ function _contour_block_SS_info_impl(
     errmeasure::ErrmeasureType = DefaultErrmeasure(nep),
     sanity_check=true,
     Shat_mode=:native,
-    rank_drop_tol=tol
+    rank_drop_tol=tol,
+    seed::Integer=10
 )where{T<:Number, MIntegrator<:MatrixIntegrator}
 
     @parse_logger_param!(logger)
@@ -162,9 +171,9 @@ function _contour_block_SS_info_impl(
     # the code is like JSIAM-paper
     L=k
 
-    Random.seed!(10); # Reproducability (not really)
-    U = rand(T,n,L);
-    V = rand(T,n,L);
+    rng = MersenneTwister(seed)
+    U = rand(rng,T,n,L);
+    V = rand(rng,T,n,L);
 
     function local_linsolve(λ::TT,V::Matrix{TT}) where {TT<:Number}
         local M0inv::LinSolver = create_linsolver(linsolvercreator, nep, λ+σ);

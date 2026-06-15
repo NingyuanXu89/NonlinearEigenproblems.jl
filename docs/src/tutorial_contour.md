@@ -88,34 +88,60 @@ In general, we do not obtain more `k` eigenvalues.
 When the search region is larger than a single contour solve should cover,
 the spectral indicator method (SIM) can be used as a lightweight screening
 step. SIM only gives an active/inactive indicator for a region. It is not an
-eigenvalue count, and it does not return final eigenpairs.
+eigenvalue count, it does not return final eigenpairs, and an inactive result
+is not a mathematical certificate that the region is empty. Random probes in
+SIM, Beyn, and block SS are controlled by local `seed=10` defaults and do not
+reset Julia's global random number generator.
 
-Start by defining a square or rectangular search region and subdividing it:
+Start by defining a square or rectangular search region:
 
 ```julia-repl
 julia> region = SquareRegion(0.0 + 0.0im, 0.5);
-julia> regions = subdivide(region);
 ```
 
-The subregions can then be screened independently:
+The default `method=:xisun` is the fast legacy Xi-Sun / pmCIM
+projection-ratio screen. It can be used directly on a hand-made subdivision:
 
 ```julia-repl
-julia> screened = sim_screen_regions(nep, regions);
+julia> regions = subdivide(region);
+julia> screened = sim_screen_regions(nep, regions; method=:xisun);
 julia> active_regions = [r.region for r in screened if r.active];
 ```
 
-Each active region can be converted to an enclosing contour for the contour
-solvers. The default enclosing contour is the circumscribed circle.
+For larger problems where an initial block SS recovery would be expensive,
+`sim_subdivide_active_regions` uses the `method=:moment_norm` screen internally
+to subdivide automatically. Its default target capacity is `k*K`, so the
+returned regions are intended to be small enough for a later block SS recovery:
 
 ```julia-repl
-julia> params = contour_parameters(enclosing_contour(active_regions[1]));
-julia> info = contour_beyn_info(nep; params..., k=10);
+julia> result = sim_subdivide_active_regions(nep, region;
+           N=32, k=2, K=2, threshold=1e-8, max_depth=4,
+           return_trace=true);
+julia> active_regions = result.regions;
 ```
 
-The info helper returns the eigenpairs together with diagnostics such as
-singular values, estimated rank, residuals, and inside-contour flags. The
-original [`contour_beyn`](@ref) and [`contour_block_SS`](@ref) functions still
-return only `(λ, V)`.
+The two SIM methods have different indicator scales, so thresholds should be
+chosen for the selected method. The moment-norm screen is a low-order
+multi-moment heuristic for subdivision; it does not form a block SS Hankel
+pencil and does not recover eigenpairs.
+
+The subdivision trace is useful for plotting. The paths use the same convention
+as `collect_region_boundaries` and `collect_contour_boundaries`:
+
+```julia-repl
+julia> accepted_paths = getproperty.(filter(t -> t.status == :accepted, result.trace), :path);
+julia> accepted_boundaries = collect_region_boundaries(region; selected=accepted_paths);
+```
+
+Each accepted region can then be converted to an enclosing contour for a final
+contour solve. A common recovery pattern is to add a few extra block SS moments
+after screening:
+
+```julia-repl
+julia> contour = enclosing_contour(active_regions[1]; shape=:circle);
+julia> params = contour_parameters(contour);
+julia> info = contour_block_SS_info(nep; params..., k=2, K=4, N=96);
+```
 
 The circumscribed contour can include points outside the square or rectangle,
 so filter returned eigenvalues back to the original region:
@@ -124,13 +150,18 @@ so filter returned eigenvalues back to the original region:
 julia> inside = filter(i -> inside_region(active_regions[1], info.lambda[i]), eachindex(info.lambda));
 ```
 
-The SIM result and optional contour diagnostics can also be passed to a policy
-helper to decide the next step:
+The candidates should then be validated by residuals, optionally refined with
+Newton, and de-duplicated with a tolerance appropriate for the problem:
 
 ```julia-repl
-julia> decision = sim_contour_decision(screened[1], info);
+julia> refined = [newton(nep; λ=info.lambda[i], v=info.V[:, i], tol=1e-12, maxit=5)
+                  for i in inside];
 ```
 
+The runnable version of this pipeline is kept in
+`docs/src/sim_workflow_demo.jl`.
+
+Returning to the direct contour comparison above,
 It seems that in this case `contour_block_SS` is better
 since it finds eigenvalues  which
 `contour_beyn` misses. However, a closer look reveals

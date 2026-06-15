@@ -65,6 +65,28 @@ end
     @test info.estimated_rank ==
         count(info.singular_values / info.singular_values[1] .> info.rank_drop_tol)
 
+    seeded_a = contour_beyn_info(nep, logger=displaylevel, radius=1.0,
+                                 neigs=1, k=2, N=100, sanity_check=false,
+                                 seed=77)
+    seeded_b = contour_beyn_info(nep, logger=displaylevel, radius=1.0,
+                                 neigs=1, k=2, N=100, sanity_check=false,
+                                 seed=77)
+    seeded_c = contour_beyn_info(nep, logger=displaylevel, radius=1.0,
+                                 neigs=1, k=2, N=100, sanity_check=false,
+                                 seed=78)
+    @test seeded_a.singular_values == seeded_b.singular_values
+    @test seeded_a.singular_values != seeded_c.singular_values
+
+    Random.seed!(1234)
+    expected_first = rand()
+    expected_second = rand()
+    Random.seed!(1234)
+    @test rand() == expected_first
+    contour_beyn_info(nep, logger=displaylevel, radius=1.0,
+                      neigs=1, k=2, N=40, sanity_check=false,
+                      seed=99)
+    @test rand() == expected_second
+
     info_checked = contour_beyn_info(nep, logger=displaylevel, σ=0.2,
                                      radius=1.0, neigs=3, sanity_check=true)
     @test info_checked.number_returned == length(info_checked.lambda)

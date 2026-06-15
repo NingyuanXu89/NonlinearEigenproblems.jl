@@ -18,6 +18,7 @@ makedocs(
         "logger.md",
         "transformations.md",
         "deflation.md",
+        "block_ss_known_spectra.md",
             "gallery.md"],
         "Tutorials" => [
         "Tutorial 1 (ABC)" => "movebc_tutorial.md",
