@@ -462,7 +462,6 @@ function _sim_moment_norm_data(
 ) where {T<:Number}
     N > 0 || error("N must be positive")
     k > 0 || error("k must be positive")
-    k <= N || error("k must be smaller or equal to N")
     K >= 0 || error("K must be nonnegative")
     K <= 3 || error("K must be at most 3 for moment_norm SIM screening")
 
