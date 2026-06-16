@@ -677,7 +677,7 @@ function sim_contour_decision(sim_result::SIMResult, contour_info=nothing;
     if contour_info === nothing
         method = _info_field(sim_result, :method, :xisun)
         reason = method == :moment_norm ? :moment_detected : :active
-        return SIMContourDecision(:run_beyn, reason, NamedTuple())
+        return SIMContourDecision(:run_ss, reason, NamedTuple())
     end
 
     estimated_rank = _info_field(contour_info, :estimated_rank, 0)
